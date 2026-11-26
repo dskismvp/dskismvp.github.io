@@ -1,2 +1,3 @@
 git is free
-git is good
+git is distributed version
+git is free softwire
